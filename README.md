@@ -1,5 +1,29 @@
-## Hi there 👋
+# 👋 Hello, Welcome to My Profile!
 
+I am a professional Python Developer passionate about building efficient, scalable, and clean code solutions. I specialize in automation, data handling, and backend development.
+
+---
+
+### 🚀 About Me
+- 🛠️ Currently working on advanced Python projects and automation scripts.
+- 💡 Interested in software architecture, data analysis, and open-source contributions.
+- 💬 Ask me about Python best practices, libraries, and frameworks.
+
+### 🛠️ Tech Stack & Tools
+- Language: Python (Data Structures, OOPs, Scripting)
+- Frameworks/Libraries: FastAPI, Django, Flask, Pandas, NumPy (Edit as per your skills)
+- Databases: PostgreSQL, MySQL, SQLite
+- Tools: Git, GitHub, Docker, VS Code
+
+---
+
+### 🌐 Connect With Me
+
+[![Telegram](https://shields.io)](https://t.me/Sangeet_Stream)
+
+---
+
+*“Simplicity is better than complexity.” – The Zen of Python*
 <!--
 **nirajkumar7257/nirajkumar7257** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
 

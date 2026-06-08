@@ -40,3 +40,11 @@ Here are some ideas to get you started:
 - 😄 Pronouns: ...
 - ⚡ Fun fact: ...
 -->
+
+### 💻 Backend & Scripting
+- Python
+- JavaScript
+- TypeScript
+- Node.js
+- Bash
+- FastAPI

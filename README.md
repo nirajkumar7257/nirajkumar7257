@@ -22,19 +22,7 @@ I am a professional Python Developer passionate about building efficient, scalab
 - Tools: Git, GitHub, Docker, VS Code
 
 ---
-
-### 🌐 Connect With Me
-
-[![CHANNEL](https://shields.io)](https://t.me/Sangeet_Stream)
-[![GROUP](https://shields.io)](https://t.me/sapna_quiz)
-
----
-
-*“Simplicity is better than complexity.” – The Zen of Python*
-<!--
-**nirajkumar7257/nirajkumar7257** is a ✨ _special_ ✨ repository because its `README.md` (this file) appears on your GitHub profile.
-
-Here are some ideas to get you started:
+## 🎯 Here are some ideas to get you started:
 
 - 🔭 I’m currently working on ...
 - 🌱 I’m currently learning ...
@@ -53,3 +41,9 @@ Here are some ideas to get you started:
 - Node.js
 - Bash
 - FastAPI
+
+---
+
+### 🤖 Connect with Me
+ <a href="https://t.me/Comeback_009"><img src="https://img.shields.io/badge/Telegram-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white"/></a>
+<a href="https://www.instagram.com/comeback_yadav?igsh=N2d2bXN3cWFudzFp"><img src="https://img.shields.io/badge/Instagram-%23E4405F.svg?logo=Instagram&logoColor=white"/></a>

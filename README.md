@@ -19,7 +19,8 @@ I am a professional Python Developer passionate about building efficient, scalab
 
 ### 🌐 Connect With Me
 
-[![Telegram](https://shields.io)](https://t.me/Sangeet_Stream)
+[![CHANNEL](https://shields.io)](https://t.me/Sangeet_Stream)
+[![GROUP](https://shields.io)](https://t.me/sapna_quiz)
 
 ---
 

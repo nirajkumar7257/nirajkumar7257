@@ -45,6 +45,18 @@ def format_time(seconds):
     secs = int(seconds) % 60
     return f"{minutes}m {secs}s"
 
+def get_persistent_keyboard():
+    """Return the persistent bottom container keyboard that stays visible"""
+    poll_button = KeyboardButton(
+        text="📊 Create a Question",
+        request_poll=KeyboardButtonPollType(type="quiz")
+    )
+    return ReplyKeyboardMarkup(
+        [[poll_button]], 
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
 def init_db():
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -89,7 +101,7 @@ async def new_quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             
         await msg_obj.reply_text(
             "Let's create a new quiz. First, send me the title of your quiz (e.g., 'Aptitude Test' or '10 questions about bears').",
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=get_persistent_keyboard()
         )
         context.user_data["quiz_build"] = {"title": "", "description": "", "questions": []}
         context.user_data["quiz_build_creator_id"] = user_id
@@ -148,15 +160,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         # Pehle niche wala container bhejenge
-        poll_button = KeyboardButton(
-            text="📊 Create a Question",
-            request_poll=KeyboardButtonPollType(type="quiz")
-        )
-        bottom_container = ReplyKeyboardMarkup(
-            [[poll_button]], 
-            resize_keyboard=True,
-            one_time_keyboard=False
-        )
+        bottom_container = get_persistent_keyboard()
         
         await update.message.reply_text(
             text="🔄 Bot container activated.", 
@@ -187,7 +191,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         context.user_data["quiz_build"]["title"] = update.message.text.strip()
-        await update.message.reply_text("Good. Now send me a description of your quiz. This is optional, you can /skip this step.")
+        await update.message.reply_text(
+            "Good. Now send me a description of your quiz. This is optional, you can /skip this step.",
+            reply_markup=get_persistent_keyboard()
+        )
         return DESCRIPTION
     except Exception as e:
         logging.error(f"Error in receive_title: {e}")
@@ -202,7 +209,7 @@ async def receive_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             "💡 **Sawal jodne ke liye:**\nClick on 📎 (Attachment) -> Select **Poll**.\n"
             "Enable **Quiz Mode**, add 2-7 options, pick the correct one, and tap Create.\n\n"
             "Send /done when finished adding questions.",
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=get_persistent_keyboard()
         )
         return QUESTIONS
     except Exception as e:
@@ -213,10 +220,16 @@ async def receive_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     try:
         poll = update.message.poll
         if poll.type != "quiz":
-            await update.message.reply_text("❌ Kripya Quiz mode wala poll hi send karein:")
+            await update.message.reply_text(
+                "❌ Kripya Quiz mode wala poll hi send karein:",
+                reply_markup=get_persistent_keyboard()
+            )
             return QUESTIONS
         if len(poll.options) > 7:
-            await update.message.reply_text("❌ Maximum 7 options allowed. Re-send poll:")
+            await update.message.reply_text(
+                "❌ Maximum 7 options allowed. Re-send poll:",
+                reply_markup=get_persistent_keyboard()
+            )
             return QUESTIONS
 
         opts = [o.text for o in poll.options]
@@ -234,12 +247,16 @@ async def receive_poll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             "• 📎 Send media/details to add context\n"
             "• 📄 Send text message for pre-message\n"
             "• ➕ Send next poll directly (auto-skips pre-message)\n"
-            "• ✅ Type /done to finish quiz"
+            "• ✅ Type /done to finish quiz",
+            reply_markup=get_persistent_keyboard()
         )
         return PRE_MESSAGE
     except Exception as e:
         logging.error(f"Error in receive_poll: {e}")
-        await update.message.reply_text("❌ Error processing poll. Please try again.")
+        await update.message.reply_text(
+            "❌ Error processing poll. Please try again.",
+            reply_markup=get_persistent_keyboard()
+        )
         return QUESTIONS
 
 async def receive_pre_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -247,7 +264,10 @@ async def receive_pre_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         current_idx = context.user_data.get("current_question_index", -1)
         
         if current_idx < 0 or current_idx >= len(context.user_data.get("quiz_build", {}).get("questions", [])):
-            await update.message.reply_text("❌ Error: Question not found!")
+            await update.message.reply_text(
+                "❌ Error: Question not found!",
+                reply_markup=get_persistent_keyboard()
+            )
             return QUESTIONS
         
         # Check if a new poll is being sent - auto-skip pre-message
@@ -259,10 +279,16 @@ async def receive_pre_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Process the new poll
             poll = update.message.poll
             if poll.type != "quiz":
-                await update.message.reply_text("❌ Kripya Quiz mode wala poll hi send karein:")
+                await update.message.reply_text(
+                    "❌ Kripya Quiz mode wala poll hi send karein:",
+                    reply_markup=get_persistent_keyboard()
+                )
                 return PRE_MESSAGE
             if len(poll.options) > 7:
-                await update.message.reply_text("❌ Maximum 7 options allowed. Re-send poll:")
+                await update.message.reply_text(
+                    "❌ Maximum 7 options allowed. Re-send poll:",
+                    reply_markup=get_persistent_keyboard()
+                )
                 return PRE_MESSAGE
 
             opts = [o.text for o in poll.options]
@@ -280,7 +306,8 @@ async def receive_pre_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "• 📎 Send media/details to add context\n"
                 "• 📄 Send text message for pre-message\n"
                 "• ➕ Send next poll directly (auto-skips pre-message)\n"
-                "• ✅ Type /done to finish quiz"
+                "• ✅ Type /done to finish quiz",
+                reply_markup=get_persistent_keyboard()
             )
             return PRE_MESSAGE
         
@@ -302,7 +329,8 @@ async def receive_pre_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"✅ Pre-message set! Your quiz now has {len(context.user_data['quiz_build']['questions'])} question(s).\n\n"
             "💬 **Next step:**\n"
             "• Send next question poll\n"
-            "• Or type /done to finish quiz"
+            "• Or type /done to finish quiz",
+            reply_markup=get_persistent_keyboard()
         )
         return QUESTIONS
     except Exception as e:
@@ -314,9 +342,15 @@ async def handle_undo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         quiz = context.user_data.get("quiz_build")
         if quiz and quiz["questions"]:
             quiz["questions"].pop()
-            await update.message.reply_text(f"↩️ Last question removed! Quiz now has {len(quiz['questions'])} question(s).\n\nSend next question or /done.")
+            await update.message.reply_text(
+                f"↩️ Last question removed! Quiz now has {len(quiz['questions'])} question(s).\n\nSend next question or /done.",
+                reply_markup=get_persistent_keyboard()
+            )
         else:
-            await update.message.reply_text("❌ No questions to remove!")
+            await update.message.reply_text(
+                "❌ No questions to remove!",
+                reply_markup=get_persistent_keyboard()
+            )
         return QUESTIONS
     except Exception as e:
         logging.error(f"Error in handle_undo: {e}")
@@ -326,14 +360,17 @@ async def finish_quiz_creation(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         quiz = context.user_data.get("quiz_build", {})
         if not quiz or not quiz.get("questions"):
-            await update.message.reply_text("❌ Error: Quiz must have at least 1 question!")
+            await update.message.reply_text(
+                "❌ Error: Quiz must have at least 1 question!",
+                reply_markup=get_persistent_keyboard()
+            )
             return QUESTIONS
         
         await update.message.reply_text(
             "⏱️ **Please set a time limit for questions:**\n\n"
             "Type any of these: 15, 30, 40, 60\n\n"
             "Example: Type '30' for 30 seconds per question",
-            reply_markup=ReplyKeyboardRemove()
+            reply_markup=get_persistent_keyboard()
         )
         return TIMER
     except Exception as e:
@@ -346,7 +383,10 @@ async def handle_timer_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         time_map = {"15": 15, "30": 30, "40": 40, "60": 60}
         
         if text not in time_map:
-            await update.message.reply_text("❌ Invalid time. Please enter: 15, 30, 40, or 60")
+            await update.message.reply_text(
+                "❌ Invalid time. Please enter: 15, 30, 40, or 60",
+                reply_markup=get_persistent_keyboard()
+            )
             return TIMER
         
         t_sec = time_map[text]
@@ -1379,7 +1419,7 @@ async def compile_group_leaderboard(chat_id, context):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        await update.message.reply_text("❌ Setup cancelled.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("❌ Setup cancelled.")
         return ConversationHandler.END
     except Exception as e:
         logging.error(f"Error in cancel: {e}")
@@ -1403,21 +1443,11 @@ async def handle_back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Purane message ko inline buttons ke sath edit karein
         await query.edit_message_text(welcome_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         
-        poll_button = KeyboardButton(
-            text="📊 Create a Question",
-            request_poll=KeyboardButtonPollType(type="quiz")
-        )
-        bottom_container = ReplyKeyboardMarkup(
-            [[poll_button]], 
-            resize_keyboard=True,
-            one_time_keyboard=False
-        )
-        
         # Ek naya chota message bhej kar container ko screen par lane ke liye
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="⚡ Bottom menu synchronized.",
-            reply_markup=bottom_container
+            reply_markup=get_persistent_keyboard()
         )
         
     except Exception as e:

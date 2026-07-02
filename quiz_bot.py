@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import json
 import logging
 import asyncio
@@ -10,6 +9,9 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
     filters, ContextTypes, ConversationHandler, CallbackQueryHandler, PollAnswerHandler
 )
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+from bson.objectid import ObjectId
 
 # Enable Logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -17,8 +19,19 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID")) if os.getenv("OWNER_ID") else None
+MONGO_DB_URI = os.getenv("MONGO_DB_URI")
 
-DB_FILE = "quiz_bot.db"
+# MongoDB Connection Setup
+try:
+    mongo_client = MongoClient(MONGO_DB_URI, serverSelectionTimeoutMS=5000)
+    mongo_client.admin.command('ping')
+    db = mongo_client['quiz_bot_db']
+    quizzes_collection = db['quizzes']
+    questions_collection = db['questions']
+    logging.info("✅ MongoDB Connected Successfully!")
+except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+    logging.error(f"❌ MongoDB Connection Failed: {e}")
+    raise
 
 # Global dictionary for active group games memory
 GROUP_GAMES = {}
@@ -58,35 +71,14 @@ def get_persistent_keyboard():
     )
 
 def init_db():
+    """Initialize MongoDB with indexes"""
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS quizzes (
-                quiz_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                creator_id INTEGER,
-                title TEXT,
-                description TEXT,
-                timer INTEGER DEFAULT 30
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS questions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                quiz_id INTEGER,
-                question_text TEXT,
-                options TEXT,
-                correct_answer TEXT,
-                explanation TEXT,
-                pre_message TEXT,
-                FOREIGN KEY(quiz_id) REFERENCES quizzes(quiz_id)
-            )
-        """)
-        conn.commit()
-        conn.close()
-        logging.info("Database initialized successfully")
+        # Create indexes for better query performance
+        quizzes_collection.create_index("creator_id")
+        questions_collection.create_index("quiz_id")
+        logging.info("✅ MongoDB indexes created successfully")
     except Exception as e:
-        logging.error(f"Error initializing database: {e}")
+        logging.error(f"Error creating indexes: {e}")
 
 init_db()
 
@@ -118,33 +110,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if args and len(args) > 0 and args[0].startswith("quiz_"):
             quiz_id = args[0].split("_")[1]
             
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("SELECT title, description, timer FROM quizzes WHERE quiz_id = ?", (quiz_id,))
-            quiz_data = cursor.fetchone()
-            cursor.execute("SELECT COUNT(*) FROM questions WHERE quiz_id = ?", (quiz_id,))
-            total_q = cursor.fetchone()
-            conn.close()
-            
-            if not quiz_data:
-                await update.message.reply_text("❌ Quiz data not found.")
-                return
+            try:
+                quiz_data = quizzes_collection.find_one({"_id": ObjectId(quiz_id)})
+                
+                if not quiz_data:
+                    await update.message.reply_text("❌ Quiz data not found.")
+                    return
 
-            title, desc, timer = quiz_data
-            time_disp = f"{timer} sec" if timer < 60 else f"{timer // 60} min"
-            
-            init_text = (
-                f"🎲 **Get ready for the quiz!**\n\n"
-                f"📚 **Title:** {escape_markdown(title)}\n"
-                f"🔥 **Description:** {escape_markdown(desc) if desc else 'No description'}\n"
-                f"🖊️ **Questions:** {total_q[0]}\n"
-                f"⏱ **Time per question:** {time_disp}\n\n"
-                "🏁 *Click 'I am ready!' to start the quiz.*"
-            )
-            
-            keyboard = [[InlineKeyboardButton("I am ready! 🎯 (0)", callback_data=f"ready_{quiz_id}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(init_text, reply_markup=reply_markup, parse_mode="Markdown")
+                title = quiz_data.get("title", "")
+                desc = quiz_data.get("description", "")
+                timer = quiz_data.get("timer", 30)
+                
+                total_q = questions_collection.count_documents({"quiz_id": ObjectId(quiz_id)})
+                time_disp = f"{timer} sec" if timer < 60 else f"{timer // 60} min"
+                
+                init_text = (
+                    f"🎲 **Get ready for the quiz!**\n\n"
+                    f"📚 **Title:** {escape_markdown(title)}\n"
+                    f"🔥 **Description:** {escape_markdown(desc) if desc else 'No description'}\n"
+                    f"🖊️ **Questions:** {total_q}\n"
+                    f"⏱ **Time per question:** {time_disp}\n\n"
+                    "🏁 *Click 'I am ready!' to start the quiz.*"
+                )
+                
+                keyboard = [[InlineKeyboardButton("I am ready! 🎯 (0)", callback_data=f"ready_{quiz_id}")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await update.message.reply_text(init_text, reply_markup=reply_markup, parse_mode="Markdown")
+            except Exception as e:
+                logging.error(f"Error fetching quiz from MongoDB: {e}")
+                await update.message.reply_text("❌ Error loading quiz data.")
             return
 
         # Normal private chat initialization layout
@@ -398,22 +392,40 @@ async def handle_timer_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         user_id = context.user_data.get("quiz_build_creator_id", update.message.from_user.id)
 
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO quizzes (creator_id, title, description, timer) VALUES (?, ?, ?, ?)", (user_id, quiz["title"], quiz["description"], t_sec))
-        qid = cursor.lastrowid
-        for q in quiz["questions"]:
-            cursor.execute("INSERT INTO questions (quiz_id, question_text, options, correct_answer, explanation, pre_message) VALUES (?, ?, ?, ?, ?, ?)", 
-                           (qid, q["text"], json.dumps(q["options"]), q["correct"], q["explanation"], q["pre_message"]))
-        conn.commit()
-        conn.close()
-        
-        context.user_data.pop("quiz_build", None)
-        context.user_data.pop("quiz_build_creator_id", None)
-        
-        await update.message.reply_text("✅ Timer set! Creating your quiz summary...")
-        await show_summary_panel_text(update, context, qid)
-        return ConversationHandler.END
+        try:
+            # Insert quiz into MongoDB
+            quiz_doc = {
+                "creator_id": user_id,
+                "title": quiz["title"],
+                "description": quiz["description"],
+                "timer": t_sec,
+                "created_at": datetime.now()
+            }
+            result = quizzes_collection.insert_one(quiz_doc)
+            qid = result.inserted_id
+            
+            # Insert questions into MongoDB
+            for q in quiz["questions"]:
+                question_doc = {
+                    "quiz_id": qid,
+                    "question_text": q["text"],
+                    "options": q["options"],
+                    "correct_answer": q["correct"],
+                    "explanation": q["explanation"],
+                    "pre_message": q["pre_message"]
+                }
+                questions_collection.insert_one(question_doc)
+            
+            context.user_data.pop("quiz_build", None)
+            context.user_data.pop("quiz_build_creator_id", None)
+            
+            await update.message.reply_text("✅ Timer set! Creating your quiz summary...")
+            await show_summary_panel_text(update, context, str(qid))
+            return ConversationHandler.END
+        except Exception as e:
+            logging.error(f"Error saving quiz to MongoDB: {e}")
+            await update.message.reply_text("❌ Error saving quiz. Please try again.")
+            return TIMER
     except Exception as e:
         logging.error(f"Error in handle_timer_text: {e}")
         await update.message.reply_text("❌ Error saving quiz. Please try again.")
@@ -426,21 +438,10 @@ async def view_my_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = query.from_user.id
         await query.answer()
 
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        # Fetch quizzes with question count
-        cursor.execute("""
-            SELECT q.quiz_id, q.title, q.timer, COUNT(qu.id) as question_count
-            FROM quizzes q
-            LEFT JOIN questions qu ON q.quiz_id = qu.quiz_id
-            WHERE q.creator_id = ?
-            GROUP BY q.quiz_id
-            ORDER BY q.quiz_id DESC
-        """, (user_id,))
-        rows = cursor.fetchall()
-        conn.close()
-
-        if not rows:
+        # Fetch quizzes from MongoDB with question count
+        quizzes = list(quizzes_collection.find({"creator_id": user_id}).sort("_id", -1))
+        
+        if not quizzes:
             keyboard = [[InlineKeyboardButton("Create New Quiz 🚀", callback_data="btn_newquiz")]]
             await query.edit_message_text(
                 text="❌ Aapne abhi tak koi quiz nahi banaya hai!",
@@ -452,14 +453,19 @@ async def view_my_quizzes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "📚 **Aapke Banaye Huye Quizzes:**\n\n"
         
         keyboard = []
-        for idx, (qid, title, timer, q_count) in enumerate(rows, 1):
+        for idx, quiz_data in enumerate(quizzes, 1):
+            qid = quiz_data["_id"]
+            title = quiz_data.get("title", "Untitled")
+            timer = quiz_data.get("timer", 30)
+            q_count = questions_collection.count_documents({"quiz_id": qid})
+            
             time_display = f"{timer}s" if timer < 60 else f"{timer // 60}m"
             text += f"{idx}. **{escape_markdown(title)}**\n"
             text += f"   ☞ {q_count} question{'s' if q_count != 1 else ''} | {time_display}/Q\n\n"
             # Add View button for each quiz - 2 per row
             if len(keyboard) == 0 or len(keyboard[-1]) == 2:
                 keyboard.append([])
-            keyboard[-1].append(InlineKeyboardButton(f"📖 Q{idx}", callback_data=f"viewq_{qid}"))
+            keyboard[-1].append(InlineKeyboardButton(f"📖 Q{idx}", callback_data=f"viewq_{str(qid)}"))
         
         # Back button on its own row
         keyboard.append([InlineKeyboardButton("Back to Main Menu 🔙", callback_data="back_main")])
@@ -473,7 +479,7 @@ async def handle_view_quiz_callback(update: Update, context: ContextTypes.DEFAUL
     try:
         query = update.callback_query
         await query.answer()
-        quiz_id = int(query.data.split("_")[1])
+        quiz_id = query.data.split("_")[1]
         await query.message.delete()
         await show_summary_panel(query, context, quiz_id)
     except Exception as e:
@@ -482,20 +488,17 @@ async def handle_view_quiz_callback(update: Update, context: ContextTypes.DEFAUL
 
 async def show_summary_panel(query, context, quiz_id):
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT title, description, timer FROM quizzes WHERE quiz_id = ?", (quiz_id,))
-        quiz_data = cursor.fetchone()
+        quiz_data = quizzes_collection.find_one({"_id": ObjectId(quiz_id)})
         
         if not quiz_data:
             await query.message.reply_text("❌ Error: Quiz data could not be retrieved.")
-            conn.close()
             return
         
-        title, description, timer = quiz_data
-        cursor.execute("SELECT COUNT(*) FROM questions WHERE quiz_id = ?", (quiz_id,))
-        total_q = cursor.fetchone()
-        conn.close()
+        title = quiz_data.get("title", "")
+        description = quiz_data.get("description", "")
+        timer = quiz_data.get("timer", 30)
+        
+        total_q = questions_collection.count_documents({"quiz_id": ObjectId(quiz_id)})
 
         time_display = f"{timer} sec" if timer < 60 else f"{timer // 60} min"
         bot_username = context.bot.username if context.bot.username else "quiz_bot"
@@ -506,7 +509,7 @@ async def show_summary_panel(query, context, quiz_id):
             "👍 Here's your quiz:\n\n"
             f"📚 **{escaped_title}**\n"
             f"📝 **Description:** {escaped_desc}\n"
-            f"🙋‍♂️ {total_q[0]} question(s) · ⏱ Time: {time_display}\n\n"
+            f"🙋‍♂️ {total_q} question(s) · ⏱ Time: {time_display}\n\n"
             f"🔗 External sharing link:\n"
             f"`https://t.me/{bot_username}?start=quiz_{quiz_id}`"
         )
@@ -525,20 +528,17 @@ async def show_summary_panel(query, context, quiz_id):
 
 async def show_summary_panel_text(update, context, quiz_id):
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT title, description, timer FROM quizzes WHERE quiz_id = ?", (quiz_id,))
-        quiz_data = cursor.fetchone()
+        quiz_data = quizzes_collection.find_one({"_id": ObjectId(quiz_id)})
         
         if not quiz_data:
             await update.message.reply_text("❌ Error: Quiz data could not be retrieved.")
-            conn.close()
             return
         
-        title, description, timer = quiz_data
-        cursor.execute("SELECT COUNT(*) FROM questions WHERE quiz_id = ?", (quiz_id,))
-        total_q = cursor.fetchone()
-        conn.close()
+        title = quiz_data.get("title", "")
+        description = quiz_data.get("description", "")
+        timer = quiz_data.get("timer", 30)
+        
+        total_q = questions_collection.count_documents({"quiz_id": ObjectId(quiz_id)})
 
         time_display = f"{timer} sec" if timer < 60 else f"{timer // 60} min"
         bot_username = context.bot.username if context.bot.username else "quiz_bot"
@@ -550,7 +550,7 @@ async def show_summary_panel_text(update, context, quiz_id):
             "🏁 Here's your quiz:\n"
             f"📚 **{escaped_title}**\n"
             f"📝 **Description:** {escaped_desc}\n"
-            f"🙋‍♂️ {total_q[0]} question(s) · ⏱ Time: {time_display}\n\n"
+            f"🙋‍♂️ {total_q} question(s) · ⏱ Time: {time_display}\n\n"
             f"🔗 External sharing link:\n"
             f"`https://t.me/{bot_username}?start=quiz_{quiz_id}`"
         )
@@ -572,7 +572,7 @@ async def handle_start_private(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         query = update.callback_query
         await query.answer()
-        quiz_id = int(query.data.split("_")[1])
+        quiz_id = query.data.split("_")[1]
         
         await query.edit_message_text(
             text="🎮 **Private Mode**\n\nAap akele is quiz ko start karne ke liye ready ho gaye?\n\nClick 'Confirm' to begin!",
@@ -590,7 +590,7 @@ async def handle_confirm_private(update: Update, context: ContextTypes.DEFAULT_T
         query = update.callback_query
         chat_id = query.message.chat_id
         user_id = query.from_user.id
-        quiz_id = int(query.data.split("_")[2])
+        quiz_id = query.data.split("_")[2]
         
         await query.answer("🚀 Quiz shuru ho rahi hai!")
         await query.edit_message_text("⏳ Quiz loading... Please wait!")
@@ -623,28 +623,25 @@ async def handle_quiz_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         query = update.callback_query
         await query.answer()
-        quiz_id = int(query.data.split("_")[1])
+        quiz_id = query.data.split("_")[1]
         
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT title, description, timer FROM quizzes WHERE quiz_id = ?", (quiz_id,))
-        quiz_data = cursor.fetchone()
-        cursor.execute("SELECT COUNT(*) FROM questions WHERE quiz_id = ?", (quiz_id,))
-        total_q = cursor.fetchone()
-        conn.close()
+        quiz_data = quizzes_collection.find_one({"_id": ObjectId(quiz_id)})
+        total_q = questions_collection.count_documents({"quiz_id": ObjectId(quiz_id)})
         
         if not quiz_data:
             await query.edit_message_text(text="❌ Quiz not found!")
             return
         
-        title, description, timer = quiz_data
+        title = quiz_data.get("title", "")
+        description = quiz_data.get("description", "")
+        timer = quiz_data.get("timer", 30)
         time_display = f"{timer} sec" if timer < 60 else f"{timer // 60} min"
         
         status_text = (
             f"📊 **Quiz Status**\n\n"
             f"📚 **Title:** {escape_markdown(title)}\n"
             f"📝 **Description:** {escape_markdown(description) if description else 'No description'}\n"
-            f"❓ **Total Questions:** {total_q[0]}\n"
+            f"❓ **Total Questions:** {total_q}\n"
             f"⏱️ **Time per Q:** {time_display}\n"
             f"✅ **Status:** Active"
         )
@@ -664,7 +661,7 @@ async def edit_quiz_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
-        quiz_id = int(query.data.split("_")[1])
+        quiz_id = query.data.split("_")[1]
         
         keyboard = [
             [InlineKeyboardButton("❓ Edit Question", callback_data=f"edquestion_{quiz_id}")],
@@ -685,7 +682,7 @@ async def back_to_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
         await query.answer()
-        quiz_id = int(query.data.split("_")[1])
+        quiz_id = query.data.split("_")[1]
         await query.message.delete()
         await show_summary_panel(query, context, quiz_id)
     except Exception as e:
@@ -700,13 +697,9 @@ async def edit_question_trigger(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         query = update.callback_query
         await query.answer()
-        quiz_id = int(query.data.split("_")[1])
+        quiz_id = query.data.split("_")[1]
         
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, question_text FROM questions WHERE quiz_id = ?", (quiz_id,))
-        questions = cursor.fetchall()
-        conn.close()
+        questions = list(questions_collection.find({"quiz_id": ObjectId(quiz_id)}))
         
         if not questions:
             await query.edit_message_text(
@@ -718,14 +711,16 @@ async def edit_question_trigger(update: Update, context: ContextTypes.DEFAULT_TY
         text = "📚 **Select a question to edit:**\n\n"
         keyboard = []
         
-        for idx, (q_id, q_text) in enumerate(questions, 1):
+        for idx, q_data in enumerate(questions, 1):
+            q_id = q_data["_id"]
+            q_text = q_data.get("question_text", "")
             # Truncate long question text for display
             display_text = q_text[:30] + "..." if len(q_text) > 30 else q_text
             text += f"{idx}. {escape_markdown(display_text)}\n"
             # Add button - 2 per row
             if len(keyboard) == 0 or len(keyboard[-1]) == 2:
                 keyboard.append([])
-            keyboard[-1].append(InlineKeyboardButton(f"Q{idx}", callback_data=f"editq_{quiz_id}_{q_id}"))
+            keyboard[-1].append(InlineKeyboardButton(f"Q{idx}", callback_data=f"editq_{quiz_id}_{str(q_id)}"))
         
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"edit_{quiz_id}")])
         
@@ -741,23 +736,20 @@ async def edit_question_trigger(update: Update, context: ContextTypes.DEFAULT_TY
 async def show_question_detail_panel(query, context, quiz_id, question_id):
     """Display complete question preview with all action buttons - 1 per row"""
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, question_text, options, correct_answer, explanation, pre_message FROM questions WHERE id = ? AND quiz_id = ?", (question_id, quiz_id))
-        q_data = cursor.fetchone()
-        
-        # Get question number
-        cursor.execute("SELECT COUNT(*) FROM questions WHERE quiz_id = ? AND id < ?", (quiz_id, question_id))
-        q_number = cursor.fetchone()[0] + 1
-        
-        conn.close()
+        q_data = questions_collection.find_one({"_id": ObjectId(question_id), "quiz_id": ObjectId(quiz_id)})
         
         if not q_data:
             await query.answer("❌ Question not found!", show_alert=True)
             return
         
-        q_id, q_text, options_json, correct_ans, explanation, pre_message = q_data
-        options = json.loads(options_json)
+        # Get question number
+        q_number = len(list(questions_collection.find({"quiz_id": ObjectId(quiz_id), "_id": {"$lt": ObjectId(question_id)}}))) + 1
+        
+        q_text = q_data.get("question_text", "")
+        options = q_data.get("options", [])
+        correct_ans = q_data.get("correct_answer", "")
+        explanation = q_data.get("explanation", "")
+        pre_message = q_data.get("pre_message", "")
         
         # Build detailed preview message
         detail_text = f"❓ **Question #{q_number}** (Current Status: Active)\n\n"
@@ -785,10 +777,10 @@ async def show_question_detail_panel(query, context, quiz_id, question_id):
         
         # Build action buttons - 1 per row (ek ke niche ek)
         keyboard = [
-            [InlineKeyboardButton("✏️ Pre-message", callback_data=f"editpre_{quiz_id}_{q_id}")],
-            [InlineKeyboardButton("🖥️ Explanation", callback_data=f"editexpl_{quiz_id}_{q_id}")],
-            [InlineKeyboardButton("🗑️ Delete Question", callback_data=f"delq_{quiz_id}_{q_id}")],
-            [InlineKeyboardButton("🔄 Replace Question", callback_data=f"replaceq_{quiz_id}_{q_id}")],
+            [InlineKeyboardButton("✏️ Pre-message", callback_data=f"editpre_{quiz_id}_{question_id}")],
+            [InlineKeyboardButton("🖥️ Explanation", callback_data=f"editexpl_{quiz_id}_{question_id}")],
+            [InlineKeyboardButton("🗑️ Delete Question", callback_data=f"delq_{quiz_id}_{question_id}")],
+            [InlineKeyboardButton("🔄 Replace Question", callback_data=f"replaceq_{quiz_id}_{question_id}")],
             [InlineKeyboardButton("🔙 Back to Questions List", callback_data=f"edquestion_{quiz_id}")]
         ]
         
@@ -808,9 +800,9 @@ async def handle_question_detail(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer()
         
         # Parse: editq_quiz_id_question_id
-        parts = query.data.split("_")
-        quiz_id = int(parts[1])
-        question_id = int(parts[2])
+        parts = query.data.split("_", 2)
+        quiz_id = parts[1]
+        question_id = parts[2]
         
         await show_question_detail_panel(query, context, quiz_id, question_id)
     except Exception as e:
@@ -824,9 +816,9 @@ async def edit_pre_message_trigger(update: Update, context: ContextTypes.DEFAULT
         await query.answer()
         
         # Parse: editpre_quiz_id_question_id
-        parts = query.data.split("_")
-        quiz_id = int(parts[1])
-        question_id = int(parts[2])
+        parts = query.data.split("_", 2)
+        quiz_id = parts[1]
+        question_id = parts[2]
         
         context.user_data["editing_q_id"] = question_id
         context.user_data["editing_quiz_id"] = quiz_id
@@ -862,12 +854,11 @@ async def save_pre_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             new_pre_msg = text
         
-        # Update database
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE questions SET pre_message = ? WHERE id = ?", (new_pre_msg, q_id))
-        conn.commit()
-        conn.close()
+        # Update MongoDB
+        questions_collection.update_one(
+            {"_id": ObjectId(q_id)},
+            {"$set": {"pre_message": new_pre_msg}}
+        )
         
         context.user_data.pop("editing_q_id", None)
         context.user_data.pop("editing_quiz_id", None)
@@ -886,9 +877,9 @@ async def edit_explanation_trigger(update: Update, context: ContextTypes.DEFAULT
         await query.answer()
         
         # Parse: editexpl_quiz_id_question_id
-        parts = query.data.split("_")
-        quiz_id = int(parts[1])
-        question_id = int(parts[2])
+        parts = query.data.split("_", 2)
+        quiz_id = parts[1]
+        question_id = parts[2]
         
         context.user_data["editing_q_id"] = question_id
         context.user_data["editing_quiz_id"] = quiz_id
@@ -924,12 +915,11 @@ async def save_explanation(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             new_explanation = text
         
-        # Update database
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE questions SET explanation = ? WHERE id = ?", (new_explanation, q_id))
-        conn.commit()
-        conn.close()
+        # Update MongoDB
+        questions_collection.update_one(
+            {"_id": ObjectId(q_id)},
+            {"$set": {"explanation": new_explanation}}
+        )
         
         context.user_data.pop("editing_q_id", None)
         context.user_data.pop("editing_quiz_id", None)
@@ -947,9 +937,9 @@ async def handle_delete_question(update: Update, context: ContextTypes.DEFAULT_T
         query = update.callback_query
         
         # Parse: delq_quiz_id_question_id
-        parts = query.data.split("_")
-        quiz_id = int(parts[1])
-        question_id = int(parts[2])
+        parts = query.data.split("_", 2)
+        quiz_id = parts[1]
+        question_id = parts[2]
         
         # Show confirmation
         await query.edit_message_text(
@@ -972,15 +962,11 @@ async def confirm_delete_question(update: Update, context: ContextTypes.DEFAULT_
         await query.answer()
         
         # Parse: confirmdel_quiz_id_question_id
-        parts = query.data.split("_")
-        quiz_id = int(parts[1])
-        question_id = int(parts[2])
+        parts = query.data.split("_", 2)
+        quiz_id = parts[1]
+        question_id = parts[2]
         
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM questions WHERE id = ?", (question_id,))
-        conn.commit()
-        conn.close()
+        questions_collection.delete_one({"_id": ObjectId(question_id)})
         
         await query.edit_message_text(
             text="✅ Question deleted successfully!",
@@ -994,7 +980,7 @@ async def edit_title_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         query = update.callback_query
         await query.answer()
-        quiz_id = int(query.data.split("_")[1])
+        quiz_id = query.data.split("_")[1]
         context.user_data["editing_quiz_id"] = quiz_id
         await query.message.reply_text("📝 Please send the **new title** for your quiz:")
         return EDIT_TITLE
@@ -1011,11 +997,10 @@ async def save_edited_title(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text("❌ Error: Session expired. Restart using menu.")
             return ConversationHandler.END
             
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE quizzes SET title = ? WHERE quiz_id = ?", (new_title, quiz_id))
-        conn.commit()
-        conn.close()
+        quizzes_collection.update_one(
+            {"_id": ObjectId(quiz_id)},
+            {"$set": {"title": new_title}}
+        )
         
         context.user_data.pop("editing_quiz_id", None)
         await update.message.reply_text("✅ Quiz title successfully updated!")
@@ -1030,7 +1015,7 @@ async def edit_desc_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     try:
         query = update.callback_query
         await query.answer()
-        quiz_id = int(query.data.split("_")[1])
+        quiz_id = query.data.split("_")[1]
         context.user_data["editing_quiz_id"] = quiz_id
         await query.message.reply_text("ℹ️ Please send the **new description** for your quiz (or type /skip to remove it):")
         return EDIT_DESC
@@ -1048,11 +1033,10 @@ async def save_edited_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await update.message.reply_text("❌ Error: Session expired.")
             return ConversationHandler.END
             
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE quizzes SET description = ? WHERE quiz_id = ?", (new_desc, quiz_id))
-        conn.commit()
-        conn.close()
+        quizzes_collection.update_one(
+            {"_id": ObjectId(quiz_id)},
+            {"$set": {"description": new_desc}}
+        )
         
         context.user_data.pop("editing_quiz_id", None)
         await update.message.reply_text("✅ Quiz description successfully updated!")
@@ -1067,7 +1051,7 @@ async def edit_timer_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         query = update.callback_query
         await query.answer()
-        quiz_id = int(query.data.split("_")[1])
+        quiz_id = query.data.split("_")[1]
         context.user_data["editing_quiz_id"] = quiz_id
         await query.message.reply_text("⏱ Please enter the new per-question timer limit: (15, 30, 40, or 60)")
         return EDIT_TIMER
@@ -1085,11 +1069,10 @@ async def save_edited_timer(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return EDIT_TIMER
             
         quiz_id = context.user_data.get("editing_quiz_id")
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE quizzes SET timer = ? WHERE quiz_id = ?", (time_map[text], quiz_id))
-        conn.commit()
-        conn.close()
+        quizzes_collection.update_one(
+            {"_id": ObjectId(quiz_id)},
+            {"$set": {"timer": time_map[text]}}
+        )
         
         context.user_data.pop("editing_quiz_id", None)
         await update.message.reply_text("✅ Quiz timer configuration updated!")
@@ -1230,15 +1213,11 @@ async def send_next_group_poll(chat_id, context):
             
         qid = game["quiz_id"]
         
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT timer FROM quizzes WHERE quiz_id = ?", (qid,))
-        timer_data = cursor.fetchone()
-        cursor.execute("SELECT question_text, options, correct_answer, pre_message, explanation FROM questions WHERE quiz_id = ?", (qid,))
-        questions = cursor.fetchall()
-        conn.close()
+        # Fetch from MongoDB
+        quiz_data = quizzes_collection.find_one({"_id": ObjectId(qid)})
+        questions = list(questions_collection.find({"quiz_id": ObjectId(qid)}))
         
-        if not timer_data or not questions:
+        if not quiz_data or not questions:
             logging.error(f"Quiz data not found for quiz_id: {qid}")
             return
         
@@ -1247,10 +1226,13 @@ async def send_next_group_poll(chat_id, context):
             return
 
         # Tuple extraction verification execution
-        timer = timer_data[0] if (timer_data and isinstance(timer_data, tuple)) else 30
+        timer = quiz_data.get("timer", 30)
         q = questions[game["current_q"]]
-        q_text, options_json, correct_ans, pre_msg, explanation = q
-        options = json.loads(options_json)
+        q_text = q.get("question_text", "")
+        options = q.get("options", [])
+        correct_ans = q.get("correct_answer", "")
+        pre_msg = q.get("pre_message", "")
+        explanation = q.get("explanation", "")
         correct_idx = options.index(correct_ans)
         
         if pre_msg:
@@ -1332,20 +1314,16 @@ async def compile_group_leaderboard(chat_id, context):
         if not game:
             return
         
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT title FROM quizzes WHERE quiz_id = ?", (game["quiz_id"],))
-        quiz_title_data = cursor.fetchone()
-        quiz_title = quiz_title_data[0] if quiz_title_data else "Quiz"
+        quiz_data = quizzes_collection.find_one({"_id": ObjectId(game["quiz_id"])})
+        questions = list(questions_collection.find({"quiz_id": ObjectId(game["quiz_id"])}))
         
-        cursor.execute("SELECT question_text, options, correct_answer FROM questions WHERE quiz_id = ?", (game["quiz_id"],))
-        questions = cursor.fetchall()
-        conn.close()
+        quiz_title = quiz_data.get("title", "Quiz") if quiz_data else "Quiz"
         
         correct_answers = {}
-        for idx, (q_text, options_json, correct_ans) in enumerate(questions):
-            options = json.loads(options_json)
-            correct_answers[idx] = options.index(correct_ans)
+        for idx, q_data in enumerate(questions):
+            options = q_data.get("options", [])
+            correct_ans = q_data.get("correct_answer", "")
+            correct_answers[idx] = options.index(correct_ans) if correct_ans in options else -1
         
         final_scores = {}
         # Include ALL users who attempted the quiz
@@ -1522,7 +1500,7 @@ def main():
         
         app.add_handler(PollAnswerHandler(track_poll_answers))
         
-        logging.info("🚀 Advanced Telegram Quiz-Bot UI Active...")
+        logging.info("🚀 Advanced Telegram Quiz-Bot UI Active with MongoDB Support...")
         app.run_polling()
     except Exception as e:
         logging.error(f"Fatal error in main: {e}")
